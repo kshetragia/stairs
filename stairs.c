@@ -1,394 +1,322 @@
 #include <Arduino.h>
 #include "Tlc5940.h"
 
-typedef struct {
-    const byte echo;
-    const word inactive_time;
-    const byte mindist;
-    const byte reset;
-    const byte trigger;
-    byte ignore;
-    unsigned long prev_time;  //время начала блокировки сонара inactive time миллисекунд
-} sonar_opt_t;
+// Направление включения лестницы
+typedef enum {
+	TO_UP,     // Снизу вверх
+	TO_DOWN,   // Сверу вниз
+	TO_MIDDLE, // С обоих сторон к середине
+	TO_UNKNOWN // Лестница выключена. Дежурная подсветка крайних ступеней.
+} direction_t;
 
-sonar_opt_t sonar1 = {
-    echo:2,
-    inactive_time:1500,
-    mindist:30,
-    reset:4,
-    trigger:8
+struct sonar_opt_t {
+	const byte echo;    // pin сонара ловим отраженный сигнал
+	const byte reset;   // pin сонара для включения/выключения. (HIGH - включен)
+	const byte trigger; // pin сонара посылаем сигнал
 };
 
-sonar_opt_t sonar2 = {
-    echo:7,
-    inactive_time:1500,
-    mindist:30,
-    reset:5,
-    trigger:6
+struct stair_t {
+	byte state[12];         // Состояние освещенности ступенек 0..5.
+	byte count;             // Количество ступенек
+	direction_t direction;  // Направление включения/выключения.
+	unsigned long timeout;  // Как долго включена лестница. Когда начинать выключать в миллисекундах.
+	byte steplight;         // За сколько шагов зажечь ступеньку до полной яркости
+	byte stepwide;          // Ширина шага. Чтобы за все шаги не превысить разрядность на выходе(0..4096)
+	byte twilight;          // Дежурная яркость крайних ступеней
+	byte wide;              // Максимальная дистанция срабатывания. Примерно 60-70% от ширины лестницы.
 };
 
-sonar_opt_t *sonar1_p = NULL;
-sonar_opt_t *sonar2_p = NULL;
+// Сонар снизу
+struct sonar_opt_t sonar1 = {
+	echo:2,
+	reset:4,
+	trigger:8
+};
 
-const byte stairsCount = 12;         // количество ступенек
-const byte initialPWMvalue = 2;      // only 0...5 (яркость первой и последней ступенек в ожидании)
-const word waitForTurnOff = 7000;    // мс, время задержки подсветки во вкл состоянии после включения последней ступеньки
+// Сонар сверху
+struct sonar_opt_t sonar2 = {
+	echo:7,
+	reset:5,
+	trigger:6
+};
 
-byte stairsArray[stairsCount];       // массив, где каждый элемент соответствует ступеньке. Все операции только с ним, далее sync2realLife
-byte direction = 0;                  // 0 = снизу вверх, 1 = сверху вниз
+struct stair_t stair;
 
-boolean allLEDsAreOn = false;           // флаг, все светодиоды включены, требуется ожидание в таком состоянии
-boolean need2LightOnBottomTop = false;  // флаг, требуется включение ступеней снизу вверх
-boolean need2LightOffBottomTop = false; // флаг, требуется выключение ступеней снизу вверх
-boolean need2LightOnTopBottom = false;  // флаг, требуется включение ступеней сверху вниз
-boolean need2LightOffTopBottom = false; // флаг, требуется выключение ступеней сверху вниз
-boolean sonar1trigged = false;          // флаг, участвующий в реакциях на сратабывание сонара в разных условиях
-boolean sonar2trigged = false;          // флаг, участвующий в реакциях на сратабывание сонара в разных условиях
-boolean nothingHappening = true;        // флаг, указывающий на "дежурный" режим лестницы, т.н. исходное состояние
+// Здесь будем хранить время когда тушить.
+unsigned long wait_to = 0;
 
-unsigned long allLEDsAreOnTime;   //время начала горения ВСЕХ ступенек
-
-static void sync2RealLife();
-static void sonarPrepare(sonar_opt_t *sonar);
-static void sonarDisable(sonar_opt_t *sonar);
-static void startBottomTop();
-static void stopBottomTop();
-static void startTopBottom();
-static void stopTopBottom();
-
-static boolean sonarTrigged(sonar_opt_t *sonar);
+static void sync2_real_life();
+static void do_init(struct sonar_opt_t *sonar);
+static void do_reset(struct sonar_opt_t *sonar);
+static void do_action(boolean start);
+static boolean is_trigged(struct sonar_opt_t *sonar);
 
 // подготовка
 void setup()
 {
-    sonar1_p = &sonar1;
-    sonar2_p = &sonar2;
+	// Разберемся с лестницей.
+	stair.timeout   = 7000;
+	stair.twilight  = 2;
+	stair.wide      = 30;
+	stair.count     = sizeof(stair.state)/sizeof(*stair.state);
+	stair.steplight = 5;
+	stair.stepwide  = 4095 / stair.steplight; // с шагом 819
+	stair.direction = TO_UNKNOWN;
 
-   //забить массив начальными значениями яркости ступенек
-   for (byte i = 1; i <= stairsCount-2; i++)
-       stairsArray[i] = 0;
+	for (byte i = 0; i < stair.count; i++)
+		stair.state[i] = 0;
 
-   //выставление дефолтной яркости первой ступеньки
-   stairsArray[0] = initialPWMvalue;
+	// немного подсветить первую и последнюю ступеньку
+	stair.state[0] = stair.twilight;
+	stair.state[stair.count - 1] = stair.twilight;
 
-   //выставление дефолтной яркости последней ступеньки
-   stairsArray[stairsCount-1] = initialPWMvalue;
+	// инициализация TLC-шки
+	Tlc.init();
 
-   // инициализация TLC-шки
-   Tlc.init();
+	//нужно, чтобы предыдущая процедура(инициализация) не "подвесила" контроллер
+	delay(1000);
 
-   //нужно, чтобы предыдущая процедура (инициализация) не "подвесила" контроллер
-   delay(1000);
+	// Подготавливаем сонары
+	do_init(&sonar1);
+	do_init(&sonar2);
 
-   //"пропихнуть" начальные значения яркости ступенек в "реальную жизнь"
-   sync2RealLife();
+	// На всякий случай сбросим их
+	do_reset(&sonar1);
+	do_reset(&sonar2);
 
-   // подготавливаем сонары
-   sonarPrepare(sonar1_p);
-   sonarPrepare(sonar2_p);
+	//"пропихнуть" начальные значения яркости ступенек в "реальную жизнь"
+	sync2_real_life();
 }
 
 // основной воркер
+// 1. Если всё выключено, то дождаться включения любого из сонаров. Возможно включение обоих.
+// 2. Зажигаем лесницу сверху, снизу, или с обоих концов одновременно. Запоминаем время когда нужно выключить
+// 3. Если лесница горит и сработал тот же сонар, то обновляем время выключения.
+// 4. Если долго ничего не происходит, то погасить зажженую лестницу и ждать отстоя пены.
+// 5. К сожалению, у нас всего два сонара. И мы не можем понять направление движения по лестнице.
+//    К примеру, один человек уже идет, а второй начал движение с другого конца. Таким образом мы не можем
+//    различать по сонарам начало движения другого человека и завершение движения того кто уже на лестнице.
+//    Косвенно можно опираться на таймер. Очевидно, что для прохода по лестнице нужно время. И оно не может
+//    быть меньше определенного значения. Будем считать, что оно равно timeout / 2.
+//    Если сработал другой датчик до этого времени, то скорее всего это новый человек. иначе завершает движение
+//    тот что уже на лестнице.
 void loop()
 {
-    sonar1trigged = sonarTrigged(sonar1_p); //выставление флага сонара 1 для последующих манипуляций с ним
-    sonar2trigged = sonarTrigged(sonar2_p); //выставление флага сонара 2 для последующих манипуляций с ним
+	boolean is_finished = (wait_to >= millis()) ? false : true;
 
-    nothingHappening = !((need2LightOnTopBottom)||(need2LightOffTopBottom)||(need2LightOnBottomTop)||(need2LightOffBottomTop)||(allLEDsAreOn));
+	// Всё включено, но прошло недостаточно времени, чтобы дойти до конца.
+	boolean need_update = ((wait_to / 2) >= millis()) ? false : true;
 
-    //если лестница находится в исходном(выключенном) состоянии, можно сбросить флаги-"потеряшки" на всякий случай
-    if (nothingHappening) {
-	sonar1_p->ignore = 0;
-	sonar2_p->ignore = 0;
-    }
+	// Проверяем сонары.
+	byte status = is_trigged(&sonar1) + (is_trigged(&sonar2) << 1);
+	switch (status) {
+		case 1: // sonar1
+			if (stair.direction == TO_UNKNOWN) {
+				// Свеженький. Жжем снизу вверх.
+				stair.direction = TO_UP;
+				do_action(true);
+				wait_to = millis() + stair.timeout;
+			} else if (stair.direction == TO_UP) {
+				// Сработал два раза подряд. Это точно разные люди.
+				// (либо один развернулся на лестнице. Хе-хе..)
+				wait_to = millis() + stair.timeout;
+			} else if (need_update) {
+				// Кто-то пришел с другой стороны раньше чем предыдущий закончил подъем.
+				// Продлим горение и поменяем направление.
+				stair.direction = TO_UP;
+				wait_to = millis() + stair.timeout;
+			}
+			break;
 
-    //процесс включения относительно сложен, нужно проверять кучу условий
+		case 2: // sonar2
+			if (stair.direction == TO_UNKNOWN) {
+				// Свеженький. Жжем сверу вниз.
+				stair.direction = TO_DOWN;
+				do_action(true);
+				wait_to = millis() + stair.timeout;
+			} else if (stair.direction == TO_DOWN) {
+				// Сработал два раза подряд. Это точно разные люди.
+				// (либо один развернулся на лестнице. Хе-хе..)
+				wait_to = millis() + stair.timeout;
+			} else if (need_update) {
+				// Кто-то пришел с другой стороны раньше чем предыдущий закончил Спуск.
+				// Продлим горение и поменяем направление.
+				stair.direction = TO_DOWN;
+				wait_to = millis() + stair.timeout;
+			}
+			break;
 
-    //процесс ВКЛючения: сначала - снизу вверх (выставление флагов и счетчиков)
-    if ((sonar1trigged) && (nothingHappening)) {
-        need2LightOnBottomTop = true; //начать освещение ступенек снизу вверх
-        sonar2_p->ignore++;  //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" сверху вниз
-    }
-    else if ((sonar1trigged) && ((need2LightOnBottomTop)||(allLEDsAreOn))) {
-        //если ступеньки уже загоряются в нужном направлении или уже горят
-        sonarDisable(sonar1_p); //просто увеличить время ожидания полностью включенной лестницы снизу вверх
-        allLEDsAreOnTime = millis();
-        sonar2_p->ignore++;  //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" сверху вниз
-        direction = 0; //направление - снизу вверх
-    }
-    else if ((sonar1trigged) && (need2LightOffBottomTop)) {
-        // а уже происходит гашение снизу вверх
-        need2LightOffBottomTop = false; //прекратить гашение ступенек снизу вверх
-        need2LightOnBottomTop = true;   //начать освещение ступенек снизу вверх
-        sonar2_p->ignore++;  //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" сверху вниз
-    }
-    else if ((sonar1trigged) && (need2LightOnTopBottom)){
-        //а уже происходит освещение сверху вниз
-        need2LightOnTopBottom = false; //прекратить освещение ступенек сверху вниз
-        need2LightOnBottomTop = true;  //начать освение ступенек снизу вверх
-        sonar2_p->ignore++;  //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" сверху вниз
-    }
-    else if ((sonar1trigged) && (need2LightOffTopBottom)){
-        //а уже происходит гашение сверху вниз
-        need2LightOffTopBottom = false; //прекратить гашение ступенек сверху вниз
-        need2LightOnBottomTop = true;   //начать освение ступенек снизу вверх
-        sonar2_p->ignore++;  //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" сверху вниз
-    }
+		case 3: // Сработали оба сонара
+			if (stair.direction == TO_UNKNOWN) {
+				// Оппа.. окружают. Жжем с обоих концов.
+				stair.direction = TO_MIDDLE;
+				do_action(true);
+				wait_to = millis() + stair.timeout;
+			} else if (stair.direction == TO_MIDDLE) {
+				// Сработали оба два раза подряд. тысячи их..
+				// Не-е.. в такие чудеса не верим. Скорее они оба завершают движение.
+				// Ничо делать не будем.
+			} else if (need_update) {
+				// Кто-то тупит с обоих сторон. Стоят и общаются через лестницу.
+				// Или просто зоопарк.
+				// Продлим горение и поменяем направление.
+				stair.direction = TO_MIDDLE;
+				wait_to = millis() + stair.timeout;
+			}
+			break;
 
-    //процесс ВКЛючения: теперь - сверху вниз (выставление флагов и счетчиков)
-    if ((sonar2trigged) && (nothingHappening)){
-        //простое включение ступенек сверху вниз из исходного состояния лестницы
-        need2LightOnTopBottom = true;//начать освещение ступенек сверху вниз
-        sonar1_p->ignore++; //игнорить противоположный сонар, чтобы при егосрабатывании не запустилось "загорание" снизу вверх
-    }
-    else if ((sonar2trigged) && ((need2LightOnTopBottom)||(allLEDsAreOn))) {
-        //если ступеньки уже загоряются в нужном направлении или уже горят
-        sonarDisable(sonar2_p);//обновить отсчет времени для освещения ступенек сверху вниз
-        allLEDsAreOnTime = millis();
-        sonar1_p->ignore++; //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" снизу вверх
-        direction = 1;//направление - сверху вниз
-    }
-    else if ((sonar2trigged) && (need2LightOffTopBottom)) {
-        //а уже происходит гашение сверху вниз
-        need2LightOffTopBottom = false; // прекратить гашение ступенек сверху вниз
-        need2LightOnTopBottom = true;   // начать освещение ступенек сверху вниз
-        sonar1_p->ignore++; //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" снизу вверх
-    }
-    else if ((sonar2trigged) && (need2LightOnBottomTop)) {
-        //а уже происходит освещение снизу вверх
-        need2LightOnBottomTop = false; // прекратить освещение ступенек снизу вверх
-        need2LightOnTopBottom = true;  // начать освение ступенек сверху вних
-        sonar1_p->ignore++; //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" снизу вверх
-    }
-    else if ((sonar2trigged) && (need2LightOffBottomTop)) {
-        // а уже происходит гашение снизу вверх
-        need2LightOffBottomTop = false; // прекратить гашение ступенек снизу вверх
-        need2LightOnTopBottom = true;   // начать освение ступенек сверху вниз
-        sonar1_p->ignore++; //игнорить противоположный сонар, чтобы при его срабатывании не запустилось "загорание" снизу вверх
-    }
-
-    //процесс ВЫКлючения относительно прост - нужно только знать направление, и выставлять флаги
-    if ((allLEDsAreOn)&&((allLEDsAreOnTime + waitForTurnOff) <= millis())) {
-        //пора гасить ступеньки в указанном направлении
-        if (direction == 0) {
-            need2LightOffBottomTop = true; // снизу вверх
-        } else {
-            need2LightOffTopBottom = true; // сверху вниз
-        }
-    }
-
-    //непосредственная обработка флагов с "пропихиванием" массива ступенек в "реальность"
-    if (need2LightOnBottomTop){
-       //увеличим яркость за 4 итерации, уложившись в 400мс (BottomTop - снизу вверх)
-       for (byte i=0; i<=3;i++) {
-           startBottomTop();
-           sync2RealLife();
-           delay(100);
-       }
-    }
-
-    if (need2LightOffBottomTop) {
-       //уменьшим яркость за 4 итерации, уложившись в 400мс (BottomTop - снизу вверх)
-       for (byte i=0; i<=3;i++) {
-           stopBottomTop();
-           sync2RealLife();
-           delay(100);
-       }
-    }
-
-    if (need2LightOnTopBottom) {
-       //увеличим яркость за 4 итерации, уложившись в 400мс (TopBottom - сверху вниз)
-       for (byte i=0; i<=3;i++) {
-           startTopBottom();
-           sync2RealLife();
-           delay(100);
-       }
-    }
-
-    if (need2LightOffTopBottom) {
-       // уменьшим яркость за 4 итерации, уложившись в 400мс (TopBottom - сверху вниз)
-       for (byte i=0; i<=3;i++) {
-           stopTopBottom();
-           sync2RealLife();
-           delay(100);
-       }
-    }
+		case 0: // Глушняк или всё включено. Ждем или тушим лестницу.
+		default:
+			if (is_finished && stair.direction != TO_UNKNOWN) {
+				do_action(false);
+				stair.direction = TO_UNKNOWN;
+			}
+			break;
+	}
 } // loop
 
-//процедура ВКЛючения снизу вверх
-void startBottomTop()
+void do_action(boolean start)
 {
-   for (byte i=1; i<=stairsCount; i++) {
-       //обработка всех ступенек по очереди, добавление по "1" яркости для одной ступеньки за раз
-       if (stairsArray[i-1] <=4) {
-          //узнать, какой ступенькой сейчас заниматься
-          stairsArray[i-1]++; //увеличить на ней яркость
-          return;
-       }
-       else if ((i == stairsCount) && (stairsArray[stairsCount-1] == 5) && (!allLEDsAreOn)) {
-          //если полностью включена последняя требуемая ступенька
-          allLEDsAreOnTime = millis(); // сохраним время начала состояния "все ступеньки включены"
-          allLEDsAreOn = true; // флаг, все ступеньки включены
-          direction = 0; // для последующего гашения ступенек снизу вверх
-          need2LightOnBottomTop = false; // поскольку шаг - последний, сбрасываем за собой флаг необходимости
-          return;
-       }
-   }
+	// Середина лестницы
+	byte middle = stair.count / 2;
+
+	// Реверсивный счетчик для операций в обратном направлении
+	byte reverse_step = 0;
+
+	// Издеваемся над всеми ступеньками по очереди
+	for (byte i = 0; i < stair.count; i++) {
+		reverse_step = stair.count - i - 1;
+
+		// Зажигаем/гасим за steplight число итераций.
+		for (byte j = 0; j < stair.steplight; j++) {
+			switch (stair.direction) {
+				case TO_UP:
+					// Жгем снизу
+					if (start) {
+						if (stair.state[i] < stair.steplight)
+							stair.state[i]++;
+						break;
+					}
+					// Гасим крайние до дежурного уровня
+					if ((i == 0 || i == (stair.count - 1)) && stair.state[i] > stair.twilight) {
+						stair.state[i]--;
+						break;
+					}
+					// Гасим середину
+					if (stair.state[i] > 0)
+						stair.state[i]--;
+					break;
+
+				case TO_DOWN:
+					// Жгем сверху
+					if (start) {
+						if (stair.state[reverse_step] < stair.steplight)
+							stair.state[stair.count - i - 1]++;
+						break;
+					}
+					// Гасим крайние до дежурного уровня
+					if ((i == 0 || i == (stair.count - 1)) && stair.state[reverse_step] > stair.twilight) {
+						stair.state[reverse_step]--;
+						break;
+					}
+					// Гасим середину
+					if (stair.state[reverse_step] > 0)
+						stair.state[reverse_step]--;
+					break;
+
+				case TO_MIDDLE:
+					// уже всё горит или уже всё потухло
+					if (i > middle) break;
+
+					// Жгем c обоих концов
+					if (start) {
+						if (stair.state[i] < stair.steplight)
+							stair.state[i]++;
+
+						if (stair.state[reverse_step] < stair.steplight)
+							stair.state[reverse_step]++;
+						break;
+					}
+
+					// Гасим из середины к краям
+					if ((middle - i) == 0) {
+						if (stair.state[0] > stair.twilight) {
+							stair.state[0]--;
+							stair.state[stair.count - 1]--;
+						}
+						break;
+					}
+
+					// Гасим середину
+					if (stair.state[middle - i] > 0) {
+						stair.state[middle - i]--;
+						stair.state[middle + i]--;
+					}
+					break;
+
+				default:
+					break;
+			}
+
+			sync2_real_life();
+			delay(100);
+		}
+	}
 }
 
-//процедура ВЫКЛючения снизу вверх
-void stopBottomTop()
+// Синхронизируем освещение лестницы с состоянием программы.
+void sync2_real_life()
 {
-   if (allLEDsAreOn) allLEDsAreOn = false; //уже Не все светодиоды включены, очевидно
-
-   for (byte i=0; i<=stairsCount-1; i++) {
-       //пытаемся перебрать все ступеньки по очереди
-       if ((i == 0)&&(stairsArray[i] > initialPWMvalue)) {
-           //если ступенька первая, снижать яркость до "дежурного" уровня ШИМ, а не 0
-           stairsArray[0]--; //снизить яркость
-           return;
-       }
-       else if ((i == stairsCount-1) && (stairsArray[i] > initialPWMvalue)) {
-           //если последняя, то снижать яркость до дежурного уровня ШИМ, а не 0
-           stairsArray[i]--;//снизить яркость
-
-           //если это последняя ступенька и на ней достигнута минимальная яркость
-           if (stairsArray[stairsCount-1] == initialPWMvalue) need2LightOffBottomTop = false;
-
-           return;
-       }
-       else if ((i != 0) && (i != (stairsCount-1)) && (stairsArray[i] >= 1)) {
-           //обработка всех остальных ступенек
-           stairsArray[i]--;//снизить яркость
-           return;
-       }
-   }
+	for (byte i = 0; i < stair.count; i++) {
+		Tlc.set(i, stair.state[i] * stair.stepwide);
+	}
+	Tlc.update();
+	delay(100);
 }
 
-//процедура ВКЛючения сверху вниз
-void startTopBottom()
+// Инициализируем железку на нужные pin-ы
+// Поддерживаем высокий импенданс, чтобы включить сонар.
+void do_init(struct sonar_opt_t *sonar)
 {
-   for (byte i=stairsCount; i>=1; i--) {
-       //обработка всех ступенек по очереди, добавление по "1" яркости для одной ступеньки за раз
-       if (stairsArray[i-1] <=4) {
-           // узнать, какой ступенькой сейчас заниматься
-           stairsArray[i-1]++;//уменьшить на ней яркость
-           return;
-       }
-       else if ((i == 1) && (stairsArray[0] == 5) && (!allLEDsAreOn)) {
-           //если полностью включена последняя требуемая ступенька
-           allLEDsAreOnTime = millis();//сохраним время начала состояния "все ступеньки включены"
-           allLEDsAreOn = true;//флаг, все ступеньки включены
-           direction = 1;//для последующего гашения ступенек снизу вверх
-           need2LightOnTopBottom = false; // поскольку шаг - последний, сбрасываем за собой флаг необходимости
-           return;
-       }
-   }
+	pinMode(sonar->trigger, OUTPUT);
+	pinMode(sonar->echo, INPUT);
+	pinMode(sonar->reset, OUTPUT);
+
+	// всегда должен быть HIGH, для перезагрузки сонара кратковременно сбросить в LOW
+	digitalWrite(sonar->reset, HIGH);
 }
 
-//процедура ВЫКЛючения сверху вниз
-void stopTopBottom()
+// Сбрасываем подвисший сонар - на 100мс "отбираем" у него питание
+void do_reset(struct sonar_opt_t *sonar)
 {
-   if (allLEDsAreOn) allLEDsAreOn = false; //уже Не все светодиоды включены, очевидно
-
-   for (byte i=stairsCount-1; i>=0; i--) {
-       //пытаемся перебрать все ступеньки по очереди
-       if ((i == stairsCount-1) && (stairsArray[i] > initialPWMvalue)) {
-           //если ступенька последняя, то снижать яркость до дежурного уровня ШИМ, а не 0
-           stairsArray[i]--;//снизить яркость
-           return;
-       }
-       else if ((i == 0)&&(stairsArray[i] > initialPWMvalue)) {
-           //если первая, то снижать яркость до дежурного уровня ШИМ, а не 0
-           stairsArray[0]--;//снизить яркость
-           if (stairsArray[0] == initialPWMvalue) need2LightOffTopBottom = false; //если это первая ступенька и на ней достигнута минимальная яркость
-           return;
-       }
-       else if ((i != 0) && (i != (stairsCount-1)) && (stairsArray[i] >= 1)) {
-           //обработка всех остальных ступенек
-           stairsArray[i]--; //снизить яркость
-           return;
-       }
-   }
+	digitalWrite(sonar->reset, LOW);
+	delay(100);
+	digitalWrite(sonar->reset, HIGH);
 }
 
-//процедуры синхронизации "фантазий" массива с "реальной жизнью"
-void sync2RealLife()
+// Ходит ли кто-нибудь?
+boolean is_trigged(struct sonar_opt_t *sonar)
 {
-   for (int i = 0; i < stairsCount; i++) {
-       // 0...5 степени яркости * 800 = вкладываемся в 0...4096
-       Tlc.set(i, stairsArray[i]*800);
-   }
-   Tlc.update();
-}
-
-//процедура первоначальной "инициализации" сонаров
-void sonarPrepare(sonar_opt_t *sonar)
-{
-    pinMode(sonar->trigger, OUTPUT);
-    pinMode(sonar->echo, INPUT);
-    pinMode(sonar->reset, OUTPUT);
-    digitalWrite(sonar->reset, HIGH); //всегда должен быть HIGH, для перезагрузки сонара кратковременно сбросить в LOW
-
-    sonar->prev_time = millis();
-    sonar->ignore = 0;
-}
-
-// процедура ресета подвисшего сонара, на 100мс "отбирает" у него питание
-void sonarReset(sonar_opt_t *sonar)
-{
-    digitalWrite(sonar->reset, LOW);
-    delay(100);
-    digitalWrite(sonar->reset, HIGH);
-}
-
-//процедура "запрета" сонара
-void sonarDisable(sonar_opt_t *sonar)
-{
-    sonar->prev_time = millis();
-}
-
-//функция, дающая знать, не "разрешен" ли уже сонар
-boolean sonarEnabled(sonar_opt_t *sonar)
-{
-    if ((sonar->prev_time + sonar->inactive_time) <= millis()) {
-        return true;
-    }
-
-    return false;
-}
-
-//процедура проверки, сработал ли сонар (с отслеживанием "подвисания" сонаров)
-boolean sonarTrigged(sonar_opt_t *sonar)
-{
-    if (sonarEnabled(sonar)) {
         digitalWrite(sonar->trigger, LOW);
         delayMicroseconds(5);
         digitalWrite(sonar->trigger, HIGH);
         delayMicroseconds(15);
         digitalWrite(sonar->trigger, LOW);
 
-        unsigned int time_us = pulseIn(sonar->echo, HIGH, 5000);//5000 - таймаут, то есть не ждать сигнала более 5мс
+	// Ждем сигнала не более 5мс
+        unsigned int time_us = pulseIn(sonar->echo, HIGH, 5000);
+
+	// Дистанцию определим по времени приема отраженного сигнала.
         unsigned int distance = time_us / 58;
 
-        if ((distance != 0) && (distance <= sonar->mindist)) {
-            //сонар считается сработавшим, принимаем "меры"
+	// Ок. Чья-то нога попала на ступеньку.
+	if (distance > 0 && distance <= stair.wide) {
+		return true;
+	}
 
-            if (sonar->ignore > 0) {
-                // если требуется 1 раз проигнорить сонар
-                sonar->ignore--; // проигнорили, сбрасываем за собой флаг необходимости
-                sonarDisable(sonar); // временно "запретить" сонар, ведь по факту он сработал (хотя и заигнорили), иначе каждые 400мс будут "ходить всё новые люди"
-                return false;
-            }
+	// Похоже сонар завис. Сбросим его и будем считать что никто не ходил.
+	if (distance <= 0)
+		do_reset(sonar);
 
-            sonarDisable(sonar); // временно "запретить" сонар, иначе каждые 400мс будут "ходить всё новые люди"
-            return true;
-        }
-        else if (distance == 0) {
-            // sonar was freezed
-            sonarReset(sonar);
-        }
-
-        return false;
-    }
+	return false;
 }
