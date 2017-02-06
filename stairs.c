@@ -5,7 +5,6 @@
 typedef enum {
 	TO_UP,     // Снизу вверх
 	TO_DOWN,   // Сверу вниз
-	TO_MIDDLE, // С обоих сторон к середине
 	TO_UNKNOWN // Лестница выключена. Дежурная подсветка крайних ступеней.
 } direction_t;
 
@@ -16,14 +15,14 @@ struct sonar_opt_t {
 };
 
 struct stair_t {
-	byte state[12];         // Состояние освещенности ступенек 0..5.
-	byte count;             // Количество ступенек
-	direction_t direction;  // Направление включения/выключения.
-	unsigned long timeout;  // Как долго включена лестница. Когда начинать выключать в миллисекундах.
-	byte steplight;         // За сколько шагов зажечь ступеньку до полной яркости
-	byte stepwide;          // Ширина шага. Чтобы за все шаги не превысить разрядность на выходе(0..4096)
-	byte twilight;          // Дежурная яркость крайних ступеней
-	byte wide;              // Максимальная дистанция срабатывания. Примерно 60-70% от ширины лестницы.
+	byte state[12];        // Состояние освещенности ступенек 0..5.
+	byte count;            // Количество ступенек
+	direction_t direction; // Направление включения/выключения.
+	unsigned long timeout; // Как долго включена лестница. Когда начинать выключать в миллисекундах.
+	byte steplight;        // За сколько шагов зажечь ступеньку до полной яркости
+	byte stepwide;         // Ширина шага. Чтобы за все шаги не превысить разрядность на выходе(0..4096)
+	byte twilight;         // Дежурная яркость крайних ступеней
+	byte wide;             // Максимальная дистанция срабатывания. Примерно 60-70% от ширины лестницы.
 };
 
 // Сонар снизу
@@ -55,20 +54,19 @@ static boolean is_trigged(struct sonar_opt_t *sonar);
 void setup()
 {
 	// Разберемся с лестницей.
-	stair.timeout   = 7000;
 	stair.twilight  = 2;
 	stair.wide      = 30;
 	stair.count     = sizeof(stair.state)/sizeof(*stair.state);
-	stair.steplight = 5;
-	stair.stepwide  = 4095 / stair.steplight; // с шагом 819
+	stair.steplight = 4;
+	stair.stepwide  = 4095 / stair.steplight; // с шагом 1024
 	stair.direction = TO_UNKNOWN;
 
-	for (byte i = 0; i < stair.count; i++)
-		stair.state[i] = 0;
-
-	// немного подсветить первую и последнюю ступеньку
-	stair.state[0] = stair.twilight;
-	stair.state[stair.count - 1] = stair.twilight;
+	// Нужно помнить, что человек наступил на лестницу и она уже начала загораться.
+	// Значит нам нет смысла долго ждать когда он пройдет. Средний шаг может длиться секунду-полторы на ступеньку.
+	// Но это очень долго. Обычно гораздо быстрее. С учетом времени включения лестницы нет смысла ждать больше чем полсекунды на ступеньку.
+	// Или даже быстрее. Скорость загорания 12(ступенек) * 100мс * 3(steplight). ~= 3.6сек Плюс она ещё гаснет столько же.
+	// итого timeout = 12 - 3.6*2 = 2.8сек. Т.е четверть от числа ступенек.
+	stair.timeout   = stair.count / 4;
 
 	// инициализация TLC-шки
 	Tlc.init();
@@ -84,13 +82,35 @@ void setup()
 	do_reset(&sonar1);
 	do_reset(&sonar2);
 
+	// Поприветствуем хозяина
+	for (byte i = 0; i < stair.steplight; i++) {
+		for (byte j = 0; j < stair.count; j++)
+			stair.state[j] = i;
+		sync2_real_life();
+	}
+
+	delay(1000);
+
+	for (byte i = 0; i < stair.steplight; i++) {
+		for (byte j = 0; j < stair.count; j++)
+			stair.state[j] = stair.steplight - i;
+		sync2_real_life();
+	}
+
+	for (byte i = 0; i < stair.count; i++)
+		stair.state[i] = 0;
+
+	// Переход в рабочий режим. Немного подсветить первую и последнюю ступеньку
+	stair.state[0] = stair.twilight;
+	stair.state[stair.count - 1] = stair.twilight;
+
 	//"пропихнуть" начальные значения яркости ступенек в "реальную жизнь"
 	sync2_real_life();
 }
 
 // основной воркер
 // 1. Если всё выключено, то дождаться включения любого из сонаров. Возможно включение обоих.
-// 2. Зажигаем лесницу сверху, снизу, или с обоих концов одновременно. Запоминаем время когда нужно выключить
+// 2. Зажигаем лесницу сверху или снизу. Запоминаем время когда нужно выключить
 // 3. Если лесница горит и сработал тот же сонар, то обновляем время выключения.
 // 4. Если долго ничего не происходит, то погасить зажженую лестницу и ждать отстоя пены.
 // 5. К сожалению, у нас всего два сонара. И мы не можем понять направление движения по лестнице.
@@ -129,6 +149,7 @@ void loop()
 			break;
 
 		case 2: // sonar2
+		case 3: // Или сработали оба сонара(редкий случай. Ведь датчика ждем всего 5мс, к тому же по очереди.)
 			if (stair.direction == TO_UNKNOWN) {
 				// Свеженький. Жжем сверу вниз.
 				stair.direction = TO_DOWN;
@@ -142,25 +163,6 @@ void loop()
 				// Кто-то пришел с другой стороны раньше чем предыдущий закончил Спуск.
 				// Продлим горение и поменяем направление.
 				stair.direction = TO_DOWN;
-				wait_to = millis() + stair.timeout;
-			}
-			break;
-
-		case 3: // Сработали оба сонара
-			if (stair.direction == TO_UNKNOWN) {
-				// Оппа.. окружают. Жжем с обоих концов.
-				stair.direction = TO_MIDDLE;
-				do_action(true);
-				wait_to = millis() + stair.timeout;
-			} else if (stair.direction == TO_MIDDLE) {
-				// Сработали оба два раза подряд. тысячи их..
-				// Не-е.. в такие чудеса не верим. Скорее они оба завершают движение.
-				// Ничо делать не будем.
-			} else if (need_update) {
-				// Кто-то тупит с обоих сторон. Стоят и общаются через лестницу.
-				// Или просто зоопарк.
-				// Продлим горение и поменяем направление.
-				stair.direction = TO_MIDDLE;
 				wait_to = millis() + stair.timeout;
 			}
 			break;
@@ -183,85 +185,75 @@ void do_action(boolean start)
 	// Реверсивный счетчик для операций в обратном направлении
 	byte reverse_step = 0;
 
+	// Будем мигать крайней ступенькой с той стороны куда уже зажигается лестница.
+	// Типа ждите, за вами выехали. Мигать будем в силу дежурного освещения.
+	boolean blink = false;
+
 	// Издеваемся над всеми ступеньками по очереди
 	for (byte i = 0; i < stair.count; i++) {
 		reverse_step = stair.count - i - 1;
+
+		// Мигаем через раз так как ступенька зажигается всего за 300..400мс.
+		if (i % 2 == 0) {
+			if ((start && stair.direction == TO_UP) || (!start && stair.direction == TO_DOWN)) {
+				// Мигаем верхней ступенькой когда идем вверх или тушим вниз
+				stair.state[stair.count - 1] = blink * stair.twilight;
+			} else if ((start && stair.direction == TO_DOWN) || (!start && stair.direction == TO_UP)) {
+				// Мигаем нижней ступенькой когда идем или тушим вниз
+				stair.state[0] = blink * stair.twilight;
+			}
+		}
 
 		// Зажигаем/гасим за steplight число итераций.
 		for (byte j = 0; j < stair.steplight; j++) {
 			switch (stair.direction) {
 				case TO_UP:
-					// Жгем снизу
+					// Жгем снизу вверх
 					if (start) {
 						if (stair.state[i] < stair.steplight)
 							stair.state[i]++;
 						break;
 					}
-					// Гасим крайние до дежурного уровня
-					if ((i == 0 || i == (stair.count - 1)) && stair.state[i] > stair.twilight) {
-						stair.state[i]--;
-						break;
-					}
-					// Гасим середину
+
+					// Гасим снизу вверх
 					if (stair.state[i] > 0)
 						stair.state[i]--;
 					break;
 
 				case TO_DOWN:
-					// Жгем сверху
+					// Жгем сверху вниз
 					if (start) {
-						if (stair.state[reverse_step] < stair.steplight)
-							stair.state[stair.count - i - 1]++;
-						break;
-					}
-					// Гасим крайние до дежурного уровня
-					if ((i == 0 || i == (stair.count - 1)) && stair.state[reverse_step] > stair.twilight) {
-						stair.state[reverse_step]--;
-						break;
-					}
-					// Гасим середину
-					if (stair.state[reverse_step] > 0)
-						stair.state[reverse_step]--;
-					break;
-
-				case TO_MIDDLE:
-					// уже всё горит или уже всё потухло
-					if (i > middle) break;
-
-					// Жгем c обоих концов
-					if (start) {
-						if (stair.state[i] < stair.steplight)
-							stair.state[i]++;
-
 						if (stair.state[reverse_step] < stair.steplight)
 							stair.state[reverse_step]++;
 						break;
 					}
 
-					// Гасим из середины к краям
-					if ((middle - i) == 0) {
-						if (stair.state[0] > stair.twilight) {
-							stair.state[0]--;
-							stair.state[stair.count - 1]--;
-						}
-						break;
-					}
-
-					// Гасим середину
-					if (stair.state[middle - i] > 0) {
-						stair.state[middle - i]--;
-						stair.state[middle + i]--;
-					}
+					// Гасим сверху вниз
+					if (stair.state[reverse_step] > 0)
+						stair.state[reverse_step]--;
 					break;
 
-				default:
+				default: // че-то не то делаем
 					break;
 			}
-
 			sync2_real_life();
-			delay(100);
 		}
+
+		if ( i % 2 == 0)
+			blink ^= blink;
 	}
+
+	// Лестница погашена. Включаем дежурное освещение.
+	if (stair.direction == TO_DOWN) {
+		stair.state[0] = stair.twilight;
+		stair.state[stair.count - 1] = stair.twilight;
+	}
+
+	// Долго мигали. Включим последнюю ступеньку если она оказалась выключенной
+	if (stair.direction == TO_UP)
+		stair.state[stair.count - 1] = stair.twilight;
+
+	sync2_real_life();
 }
 
 // Синхронизируем освещение лестницы с состоянием программы.
