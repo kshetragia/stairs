@@ -14,7 +14,7 @@ TlcTest Tlc;
 // class members
 void TlcTest::update() {
 	for (byte i = 0; i < STAIRS_COUNT; i++) {
-		printf("%" PRIu8 " ", stair[i]);
+		printf(" %i ", stair[i]);
 	}
 	printf("\n");
 };
@@ -59,16 +59,21 @@ void delayMicroseconds(useconds_t delay)
 unsigned int pulseIn(const byte pin, const byte mode, useconds_t timeout)
 {
 	// sonar 1
-	if (pin == 8) {
+	printf("pulse pin %i: ", pin);
+
+	if (pin == 2) {
+		printf("sonar1 %s\n", Tlc.is_enabled_sonar1() ? "on" : "off");
 		return Tlc.is_enabled_sonar1() ? 1200 : 2000 ;
 	}
 
 	// sonar 2
-	if (pin == 6) {
+	if (pin == 7) {
+		printf("sonar2 %s\n", Tlc.is_enabled_sonar2() ? "on" : "off");
 		return Tlc.is_enabled_sonar2() ? 1200 : 2000 ;
 	}
 	sleep(1);
 
+	printf("nothing trigged\n");
 	return 2000;
 }
 
@@ -77,6 +82,21 @@ int main()
 	printf("---------------- Begin Setup ---------------\n");
 	setup();
 	printf("------------------End Setup ----------------\n\n");
-	printf("---------------- Begin Loop ---------------\n");
+	printf("---------------- Begin Waiting Loop ---------------\n");
 	loop();
+	printf("---------------- End Waiting Loop ---------------\n\n");
+	printf("---------------- Begin Sonar1 Loop ---------------\n");
+	Tlc.sonar1enable();
+	loop();
+	Tlc.sonar1disable();
+	sleep(5);
+	loop();
+	printf("---------------- End Sonar1 Loop ---------------\n\n");
+	printf("---------------- Begin Sonar2 Loop ---------------\n");
+	Tlc.sonar2enable();
+	loop();
+	Tlc.sonar2disable();
+	sleep(5);
+	loop();
+	printf("---------------- End Sonar2 Loop ---------------\n\n");
 }

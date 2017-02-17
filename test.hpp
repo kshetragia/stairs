@@ -19,7 +19,7 @@ struct TlcTest
 	void init();
 	void update();
 
-	void set(byte pin, byte mode) { stair[pin] = mode; };
+	void set(byte pin, int mode) { stair[pin] = mode; }
 
 	void sonar1enable()  { sonar1 = true; }
 	void sonar1disable() { sonar1 = false; }
@@ -31,7 +31,7 @@ struct TlcTest
 	bool is_enabled_sonar2() { return sonar2; };
 
 private:
-	byte stair[STAIRS_COUNT];
+	int stair[STAIRS_COUNT];
 
 	bool sonar1;
 	bool sonar2;
