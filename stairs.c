@@ -176,14 +176,16 @@ void do_action(boolean start)
 		reverse_step = STAIRS_COUNT - i - 1;
 
 		// Мигаем через раз так как ступенька зажигается всего за 300..400мс.
-		if (i % 2 == 0) {
-			if ((start && stair.direction == TO_UP) || (!start && stair.direction == TO_DOWN)) {
-				// Мигаем верхней ступенькой когда идем вверх или тушим вниз
+		if (start) {
+			if (stair.direction == TO_UP)
 				stair.state[STAIRS_COUNT - 1] = blink * stair.twilight;
-			} else if ((start && stair.direction == TO_DOWN) || (!start && stair.direction == TO_UP)) {
-				// Мигаем нижней ступенькой когда идем или тушим вниз
+			if (stair.direction == TO_DOWN)
 				stair.state[0] = blink * stair.twilight;
-			}
+		} else {
+			if (stair.direction == TO_UP)
+				stair.state[0] = blink * stair.twilight;
+			if (stair.direction == TO_DOWN)
+				stair.state[STAIRS_COUNT - 1] = blink * stair.twilight;
 		}
 
 		// Зажигаем/гасим за steplight число итераций.
@@ -221,8 +223,7 @@ void do_action(boolean start)
 			sync2_real_life();
 		}
 
-		if ( i % 2 == 0)
-			blink ^= blink;
+		(i % 2 == 0) ? blink = !blink : blink;
 	}
 
 	// Лестница погашена. Включаем дежурное освещение.
@@ -233,7 +234,9 @@ void do_action(boolean start)
 
 	// Долго мигали. Включим последнюю ступеньку если она оказалась выключенной
 	if (stair.direction == TO_UP)
-		stair.state[STAIRS_COUNT - 1] = stair.twilight;
+		stair.state[STAIRS_COUNT - 1] = stair.state[STAIRS_COUNT - 2];
+	if (stair.direction == TO_DOWN)
+		stair.state[0] = stair.state[1];
 
 	sync2_real_life();
 }
