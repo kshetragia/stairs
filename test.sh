@@ -2,7 +2,7 @@
 
 PROG=do_test
 
-SRCS="testenv.cc stairs.cc"
+SRCS="testenv.cc stairs.c"
 
 CXXFLAGS="-I/usr/include -D_FILE_OFFSET_BITS=64 -O2 -DIS_TEST -Wall -Werror"
 

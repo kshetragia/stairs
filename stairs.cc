@@ -1,14 +1,10 @@
 #include "stairs.h"
+#include <stdio.h>
 
-// Почему-то этот блок не может быть обработан корректно в IDE если поместить его в stairs.h
-#ifdef IS_TEST
-#include "test.hpp"
-#else
-#include <Arduino.h>
+// Почему-то CodeBlocks линкер не обрабатывает это в stairs.h
+#ifndef IS_TEST
 #include "Tlc5940.h"
 #endif
-
-#include <stdio.h>
 
 // Сонар снизу
 struct sonar_opt_t sonar1 = {
