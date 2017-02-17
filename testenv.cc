@@ -7,19 +7,20 @@
 #include <time.h>
 
 #include "stairs.h"
+#include "test.hpp"
 
 TlcTest Tlc;
 
 // class members
 void TlcTest::update() {
-	for (byte i = 0; i < 16; i++) {
+	for (byte i = 0; i < STAIRS_COUNT; i++) {
 		printf("%" PRIu8 " ", stair[i]);
 	}
 	printf("\n");
 };
 
 void TlcTest::init() {
-	for (byte i = 0; i < sizeof(stair)/sizeof(stair[0]); i++) {
+	for (byte i = 0; i < STAIRS_COUNT; i++) {
 		stair[i] = 0;
 	}
 
@@ -76,7 +77,6 @@ int main()
 	printf("---------------- Begin Setup ---------------\n");
 	setup();
 	printf("------------------End Setup ----------------\n\n");
-	sleep(5);
 	printf("---------------- Begin Loop ---------------\n");
 	loop();
 }

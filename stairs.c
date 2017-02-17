@@ -1,10 +1,13 @@
-#include "stairs.h"
 #include <stdio.h>
 
 // Почему-то CodeBlocks линкер не обрабатывает это в stairs.h
-#ifndef IS_TEST
+#ifdef IS_TEST
+#include "test.hpp"
+#else
 #include "Tlc5940.h"
 #endif
+
+#include "stairs.h"
 
 // Сонар снизу
 struct sonar_opt_t sonar1 = {
@@ -37,7 +40,6 @@ void setup()
 	// Разберемся с лестницей.
 	stair.twilight  = 2;
 	stair.wide      = 30;
-	stair.count     = sizeof(stair.state)/sizeof(*stair.state);
 	stair.steplight = 4;
 	stair.stepwide  = 4095 / stair.steplight; // с шагом 1024
 	stair.direction = TO_UNKNOWN;
@@ -47,7 +49,7 @@ void setup()
 	// Но это очень долго. Обычно гораздо быстрее. С учетом времени включения лестницы нет смысла ждать больше чем полсекунды на ступеньку.
 	// Или даже быстрее. Скорость загорания 16(ступенек) * 100мс * 3(steplight). ~= 4.8сек Плюс она ещё гаснет столько же.
 	// итого timeout выбран равным четверти от числа ступенек. хотя лучше чтобы был константной величиной.
-	stair.timeout   = stair.count / 4;
+	stair.timeout   = STAIRS_COUNT / 4;
 
 	// инициализация TLC-шки
 	Tlc.init();
@@ -65,7 +67,7 @@ void setup()
 
 	// Поприветствуем хозяина
 	for (byte i = 0; i < stair.steplight; i++) {
-		for (byte j = 0; j < stair.count; j++) {
+		for (byte j = 0; j < STAIRS_COUNT; j++) {
 			stair.state[j] = i;
 		}
 		sync2_real_life();
@@ -74,18 +76,18 @@ void setup()
 	delay(1000);
 
 	for (byte i = 0; i < stair.steplight; i++) {
-		for (byte j = 0; j < stair.count; j++)
+		for (byte j = 0; j < STAIRS_COUNT; j++)
 			stair.state[j] = stair.steplight - i;
 		sync2_real_life();
 	}
 
-	for (byte i = 0; i < stair.count; i++)
+	for (byte i = 0; i < STAIRS_COUNT; i++)
 		stair.state[i] = 0;
 	sync2_real_life();
 
 	// Переход в рабочий режим. Немного подсветить первую и последнюю ступеньку
 	stair.state[0] = stair.twilight;
-	stair.state[stair.count - 1] = stair.twilight;
+	stair.state[STAIRS_COUNT - 1] = stair.twilight;
 
 	//"пропихнуть" начальные значения яркости ступенек в "реальную жизнь"
 	sync2_real_life();
@@ -170,14 +172,14 @@ void do_action(boolean start)
 	boolean blink = false;
 
 	// Издеваемся над всеми ступеньками по очереди
-	for (byte i = 0; i < stair.count; i++) {
-		reverse_step = stair.count - i - 1;
+	for (byte i = 0; i < STAIRS_COUNT; i++) {
+		reverse_step = STAIRS_COUNT - i - 1;
 
 		// Мигаем через раз так как ступенька зажигается всего за 300..400мс.
 		if (i % 2 == 0) {
 			if ((start && stair.direction == TO_UP) || (!start && stair.direction == TO_DOWN)) {
 				// Мигаем верхней ступенькой когда идем вверх или тушим вниз
-				stair.state[stair.count - 1] = blink * stair.twilight;
+				stair.state[STAIRS_COUNT - 1] = blink * stair.twilight;
 			} else if ((start && stair.direction == TO_DOWN) || (!start && stair.direction == TO_UP)) {
 				// Мигаем нижней ступенькой когда идем или тушим вниз
 				stair.state[0] = blink * stair.twilight;
@@ -226,12 +228,12 @@ void do_action(boolean start)
 	// Лестница погашена. Включаем дежурное освещение.
 	if (stair.direction == TO_DOWN) {
 		stair.state[0] = stair.twilight;
-		stair.state[stair.count - 1] = stair.twilight;
+		stair.state[STAIRS_COUNT - 1] = stair.twilight;
 	}
 
 	// Долго мигали. Включим последнюю ступеньку если она оказалась выключенной
 	if (stair.direction == TO_UP)
-		stair.state[stair.count - 1] = stair.twilight;
+		stair.state[STAIRS_COUNT - 1] = stair.twilight;
 
 	sync2_real_life();
 }
@@ -239,7 +241,7 @@ void do_action(boolean start)
 // Синхронизируем освещение лестницы с состоянием программы.
 void sync2_real_life()
 {
-	for (byte i = 0; i < stair.count; i++) {
+	for (byte i = 0; i < STAIRS_COUNT; i++) {
 		Tlc.set(i, stair.state[i] * stair.stepwide);
 	}
 	Tlc.update();

@@ -1,10 +1,18 @@
 #pragma once
 
-#ifdef IS_TEST
-#include "test.hpp"
-#else
+#define STAIRS_COUNT 16
+
+#ifndef IS_TEST
 #include <Arduino.h>
 #include "Tlc5940.h"
+#endif
+
+#ifndef byte
+#define byte    uint8_t
+#endif
+
+#ifndef boolean
+#define boolean bool
 #endif
 
 // Направление включения лестницы
@@ -21,12 +29,11 @@ struct sonar_opt_t {
 };
 
 struct stair_t {
-	byte state[16];        // Состояние освещенности ступенек 0..5.
-	byte count;            // Количество ступенек
-	byte steplight;        // За сколько шагов зажечь ступеньку до полной яркости
-	byte stepwide;         // Ширина шага. Чтобы за все шаги не превысить разрядность на выходе(0..4096)
-	byte twilight;         // Дежурная яркость крайних ступеней
-	byte wide;             // Максимальная дистанция срабатывания. Примерно 60-70% от ширины лестницы.
-	unsigned long timeout; // Как долго включена лестница. Когда начинать выключать в миллисекундах.
+	byte state[STAIRS_COUNT];   // Состояние освещенности ступенек 0..5.
+	byte steplight;             // За сколько шагов зажечь ступеньку до полной яркости
+	byte stepwide;              // Ширина шага. Чтобы за все шаги не превысить разрядность на выходе(0..4096)
+	byte twilight;              // Дежурная яркость крайних ступеней
+	byte wide;                  // Максимальная дистанция срабатывания. Примерно 60-70% от ширины лестницы.
+	unsigned long timeout;      // Как долго включена лестница. Когда начинать выключать в миллисекундах.
 	enum direction_t direction; // Направление включения/выключения.
 };

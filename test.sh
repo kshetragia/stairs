@@ -17,10 +17,10 @@ OBJS=`echo $SRCS | sed -e "s|\.c[c]*|\.o|g"`
 rm -f $OBJS
 
 for src in $SRCS; do
-	cc $CXXFLAGS -c $src || die
+	c++ $CXXFLAGS -c $src || die
 done
 
-cc $CXXFLAGS stairs.o testenv.o -o $PROG || die
+c++ $CXXFLAGS stairs.o testenv.o -o $PROG || die
 
 ./$PROG
 

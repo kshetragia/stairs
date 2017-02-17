@@ -7,8 +7,7 @@
 #include <unistd.h>
 #include <stdio.h>
 
-#define byte    uint8_t
-#define boolean bool
+#include "stairs.h"
 
 #define INPUT   1
 #define OUTPUT  2
@@ -32,7 +31,7 @@ struct TlcTest
 	bool is_enabled_sonar2() { return sonar2; };
 
 private:
-	byte stair[16];
+	byte stair[STAIRS_COUNT];
 
 	bool sonar1;
 	bool sonar2;
