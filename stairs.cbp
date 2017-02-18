@@ -652,6 +652,9 @@
 		</Build>
 		<Compiler>
 			<Add directory="." />
+			<Add directory="../../../../../Arduino/CodeBlocks/arduino" />
+			<Add directory="../stairs" />
+			<Add directory="Tlc5940" />
 		</Compiler>
 		<Unit filename="stairs.c">
 			<Option compilerVar="CC" />
