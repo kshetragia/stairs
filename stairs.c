@@ -226,17 +226,19 @@ void do_action(boolean start)
 		(i % 2 == 0) ? blink = !blink : blink;
 	}
 
-	// Лестница погашена. Включаем дежурное освещение.
-	if (stair.direction == TO_DOWN) {
+	if (!start) {
+		// Лестница погашена. Включаем дежурное освещение.
 		stair.state[0] = stair.twilight;
 		stair.state[STAIRS_COUNT - 1] = stair.twilight;
-	}
+	} else {
 
-	// Долго мигали. Включим последнюю ступеньку если она оказалась выключенной
-	if (stair.direction == TO_UP)
-		stair.state[STAIRS_COUNT - 1] = stair.state[STAIRS_COUNT - 2];
-	if (stair.direction == TO_DOWN)
-		stair.state[0] = stair.state[1];
+		// Долго мигали. Включим последнюю ступеньку если она оказалась выключенной
+		if (stair.direction == TO_UP)
+			stair.state[STAIRS_COUNT - 1] = stair.state[STAIRS_COUNT - 2];
+		if (stair.direction == TO_DOWN)
+			stair.state[0] = stair.state[1];
+
+	}
 
 	sync2_real_life();
 }

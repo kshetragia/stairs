@@ -92,6 +92,10 @@ int main()
 	sleep(5);
 	loop();
 	printf("---------------- End Sonar1 Loop ---------------\n\n");
+	printf("---------------- Sonar1 State Begin ---------------\n\n");
+	Tlc.update();
+	printf("---------------- Sonar1 State End ---------------\n\n");
+	printf("---------------- End Sonar1 Loop ---------------\n\n");
 	printf("---------------- Begin Sonar2 Loop ---------------\n");
 	Tlc.sonar2enable();
 	loop();
@@ -99,4 +103,7 @@ int main()
 	sleep(5);
 	loop();
 	printf("---------------- End Sonar2 Loop ---------------\n\n");
+	printf("---------------- Sonar2 State Begin ---------------\n\n");
+	Tlc.update();
+	printf("---------------- Sonar2 State End ---------------\n\n");
 }
